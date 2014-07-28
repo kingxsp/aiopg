@@ -1,4 +1,5 @@
 import asyncio
+import collections
 
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE
 
@@ -26,7 +27,11 @@ class Pool:
         self._loop = loop
         self._timeout = timeout
         self._conn_kwargs = kwargs
-        self._free = asyncio.queues.Queue(maxsize, loop=self._loop)
+        self._not_empty = asyncio.Condition(loop=loop)
+        self._not_full = asyncio.Condition(loop=loop)
+        self._maxsize = maxsize
+        self._minsize = minsize
+        self._free = collections.deque()
         self._used = set()
 
     @property
@@ -35,7 +40,7 @@ class Pool:
 
     @property
     def maxsize(self):
-        return self._free.maxsize
+        return self._maxsize
 
     @property
     def size(self):
@@ -43,7 +48,7 @@ class Pool:
 
     @property
     def freesize(self):
-        return self._free.qsize()
+        return len(self._free)
 
     @property
     def timeout(self):
@@ -52,9 +57,14 @@ class Pool:
     @asyncio.coroutine
     def clear(self):
         """Close all free connections in pool."""
-        while not self._free.empty():
-            conn = yield from self._free.get()
-            yield from conn.close()
+        if not self._free:
+            return
+        with (yield from self._not_full):
+            with (yield from self._not_empty):
+                for conn in self._free:
+                    yield from conn.close()
+                self._free.clear()
+                self._not_full.notify()
 
     @asyncio.coroutine
     def acquire(self):
@@ -73,7 +83,7 @@ class Pool:
 
     @asyncio.coroutine
     def _fill_free_pool(self):
-        while self.freesize < self.minsize and self.size < self.maxsize:
+        while self .freesize < self.minsize and self.size < self.maxsize:
             conn = yield from connect(
                 self._dsn, loop=self._loop, timeout=self._timeout,
                 **self._conn_kwargs)
