@@ -27,12 +27,12 @@ class Pool:
         self._loop = loop
         self._timeout = timeout
         self._conn_kwargs = kwargs
-        self._not_empty = asyncio.Condition(loop=loop)
-        self._not_full = asyncio.Condition(loop=loop)
+        self._cv = asyncio.Condition(loop=loop)
         self._maxsize = maxsize
         self._minsize = minsize
         self._free = collections.deque()
         self._used = set()
+        self._connecting_count = 0
 
     @property
     def minsize(self):
@@ -44,7 +44,7 @@ class Pool:
 
     @property
     def size(self):
-        return self.freesize + len(self._used)
+        return self.freesize + len(self._used) + self._connecting_count
 
     @property
     def freesize(self):
@@ -59,35 +59,51 @@ class Pool:
         """Close all free connections in pool."""
         if not self._free:
             return
-        with (yield from self._not_full):
-            with (yield from self._not_empty):
-                for conn in self._free:
-                    yield from conn.close()
-                self._free.clear()
-                self._not_full.notify()
+        with (yield from self._cv):
+            for conn in self._free:
+                yield from conn.close()
+            self._free.clear()
+            self._cv.notify()
 
     @asyncio.coroutine
     def acquire(self):
         """Acquire free connection from the pool."""
         yield from self._fill_free_pool()
-        if self.minsize > 0 or not self._free.empty():
-            conn = yield from self._free.get()
-        else:
-            conn = yield from connect(
-                self._dsn, loop=self._loop, timeout=self._timeout,
-                **self._conn_kwargs)
-        assert not conn.closed, conn
-        assert conn not in self._used, (conn, self._used)
-        self._used.add(conn)
-        return conn
+        with (yield from self._cv):
+            if (self.minsize > 0 or
+                    (not self._free and not self._connecting_count)):
+                conn = yield from self._free.get()
+            else:
+                conn = yield from connect(
+                    self._dsn, loop=self._loop, timeout=self._timeout,
+                    **self._conn_kwargs)
+            assert not conn.closed, conn
+            assert conn not in self._used, (conn, self._used)
+            self._used.add(conn)
+            return conn
 
     @asyncio.coroutine
     def _fill_free_pool(self):
-        while self .freesize < self.minsize and self.size < self.maxsize:
+        while self.freesize < self.minsize and self.size < self.maxsize:
             conn = yield from connect(
                 self._dsn, loop=self._loop, timeout=self._timeout,
                 **self._conn_kwargs)
             yield from self._free.put(conn)
+
+    @asyncio.coroutine
+    def _connect_one(self):
+        self._connecting_count += 1
+        conn = yield from connect(
+            self._dsn, loop=self._loop, timeout=self._timeout,
+            **self._conn_kwargs)
+        with (yield from self._cv):
+            while self.size >= self.maxsize:
+                yield from self._cv.wait()
+            self._connecting_count -= 1
+            signal = not (self._free)
+            self._free.append(conn)
+            if signal:
+                self._cv.notify()
 
     def release(self, conn):
         """Release free connection back to the connection pool.
