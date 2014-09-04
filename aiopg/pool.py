@@ -28,6 +28,7 @@ class Pool:
         self._conn_kwargs = kwargs
         self._free = asyncio.queues.Queue(maxsize, loop=self._loop)
         self._used = set()
+        self._lock = asyncio.Lock(loop=loop)
 
     @property
     def minsize(self):
@@ -67,19 +68,23 @@ class Pool:
         return conn
 
     @asyncio.coroutine
+    def _create_connection(self):
+        if self.size <= self.maxsize:
+            with (yield from self._lock):
+                if self.size <= self.maxsize:
+                    conn = yield from connect(
+                        self._dsn, loop=self._loop, timeout=self._timeout,
+                        **self._conn_kwargs)
+                    yield from self._free.put(conn)
+
+    @asyncio.coroutine
     def _fill_free_pool(self, override_min):
         while self.size < self.minsize:
-            conn = yield from connect(
-                self._dsn, loop=self._loop, timeout=self._timeout,
-                **self._conn_kwargs)
-            yield from self._free.put(conn)
+            yield from self._create_connection()
         if not self._free.empty():
             return
-        if override_min and self.size < self.maxsize:
-            conn = yield from connect(
-                self._dsn, loop=self._loop, timeout=self._timeout,
-                **self._conn_kwargs)
-            yield from self._free.put(conn)
+        if override_min and self.size <= self.maxsize:
+            yield from self._create_connection()
 
     def release(self, conn):
         """Release free connection back to the connection pool.

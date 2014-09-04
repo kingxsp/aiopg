@@ -211,8 +211,10 @@ class TestPool(unittest.TestCase):
             fut2 = pool.acquire()
             fut3 = pool.acquire()
 
+            print(11111111111111111111111111111111111111111111)
             conn1, conn2, conn3 = yield from asyncio.gather(fut1, fut2, fut3,
                                                             loop=self.loop)
+            print(222222222222222222222222222222222222222222222)
             self.assertEqual(3, pool.size)
             self.assertEqual(0, pool.freesize)
             self.assertEqual({conn1, conn2, conn3}, pool._used)
@@ -352,5 +354,12 @@ class TestPool(unittest.TestCase):
             self.addCleanup(pool.release, c2)
             self.assertEqual(0, pool.freesize)
             self.assertEqual(2, pool.size)
+
+            futs = []
+            for i in range(3):
+                futs.append(pool.acquire())
+
+            for f in asyncio.as_completed(futs, loop=self.loop):
+                pass
 
         self.loop.run_until_complete(go())
